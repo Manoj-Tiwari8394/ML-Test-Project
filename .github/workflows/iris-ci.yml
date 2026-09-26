@@ -1,0 +1,58 @@
+name: Iris ML CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-kfp.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Check Python syntax
+        run: python -m compileall -q src tests pipelines
+
+      - name: Build inference image
+        run: docker build --tag iris-ml:ci .
+
+      - name: Smoke-test inference container
+        run: |
+          docker run --detach --name iris-ml-ci -p 127.0.0.1:8000:8000 iris-ml:ci
+          trap 'docker rm --force iris-ml-ci >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 20); do
+            curl --fail --silent http://127.0.0.1:8000/healthz >/dev/null && break
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8000/healthz >/dev/null
+          curl --fail --silent -X POST http://127.0.0.1:8000/predict \
+            -H 'Content-Type: application/json' \
+            -d '{"sepal length (cm)":5.1,"sepal width (cm)":3.5,"petal length (cm)":1.4,"petal width (cm)":0.2}' \
+            | grep -q '"species": "setosa"'
+
+      - name: Compile Kubeflow pipeline
+        run: |
+          python -m pip install -r requirements-kfp.txt
+          python pipelines/iris_training_pipeline.py --output /tmp/iris-training-pipeline.yaml
