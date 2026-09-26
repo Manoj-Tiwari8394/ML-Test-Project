@@ -12,9 +12,9 @@ COPY requirements-serving.txt .
 RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements-serving.txt
 
+COPY models/iris_model.joblib ./models/iris_model.joblib
 COPY src ./src
-RUN python -m src.export_model --output "${MODEL_PATH}" \
-    && useradd --no-create-home --uid 10001 appuser \
+RUN useradd --no-create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app
 
 USER 10001:10001

@@ -1,4 +1,4 @@
-name: Iris ML CI
+name: Iris ML CI and deployment
 
 on:
   push:
@@ -8,8 +8,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: iris-ml-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  test-and-build:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -24,7 +28,7 @@ jobs:
             requirements-dev.txt
             requirements-kfp.txt
 
-      - name: Install dependencies
+      - name: Install project dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
@@ -34,6 +38,9 @@ jobs:
 
       - name: Check Python syntax
         run: python -m compileall -q src tests pipelines
+
+      - name: Create model for inference image
+        run: python -m src.export_model --output models/iris_model.joblib
 
       - name: Build inference image
         run: docker build --tag iris-ml:ci .
@@ -56,3 +63,91 @@ jobs:
         run: |
           python -m pip install -r requirements-kfp.txt
           python pipelines/iris_training_pipeline.py --output /tmp/iris-training-pipeline.yaml
+
+  register-and-deploy:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, linux, x64, iris-mlops]
+    timeout-minutes: 30
+    steps:
+      - name: Check out pushed revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Create isolated CI environment
+        run: |
+          python -m venv "$RUNNER_TEMP/iris-deploy-venv"
+          "$RUNNER_TEMP/iris-deploy-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/iris-deploy-venv/bin/python" -m pip install -r requirements.txt
+
+      - name: Configure persistent local MLflow registry
+        run: |
+          mlflow_home="$HOME/.local/share/iris-mlops"
+          mkdir -p "$mlflow_home/artifacts"
+          printf 'MLFLOW_TRACKING_URI=sqlite:///%s/mlflow.db\n' "$mlflow_home" >> "$GITHUB_ENV"
+          printf 'MLFLOW_ARTIFACT_ROOT=file://%s/artifacts\n' "$mlflow_home" >> "$GITHUB_ENV"
+
+      - name: Train, track push metadata, and register model version
+        id: train
+        env:
+          GITHUB_ACTIONS: "true"
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/iris-deploy-venv/bin/python" -m src.train \
+            --experiment-name iris-push-deploy \
+            --register-model-name iris-classifier \
+            --model-path models/iris_model.joblib \
+            | tee "$RUNNER_TEMP/iris-training.log"
+          model_version="$(sed -n 's/^Registered model: iris-classifier version //p' "$RUNNER_TEMP/iris-training.log" | tail -n 1)"
+          test -n "$model_version"
+          printf 'version=%s\n' "$model_version" >> "$GITHUB_OUTPUT"
+
+      - name: Build image containing the registered model
+        env:
+          IMAGE: iris-ml:${{ github.sha }}
+          MODEL_VERSION: ${{ steps.train.outputs.version }}
+        run: |
+          docker build \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "mlflow.model.name=iris-classifier" \
+            --label "mlflow.model.version=${MODEL_VERSION}" \
+            --tag "$IMAGE" .
+
+      - name: Load image into Kind and deploy this model version
+        env:
+          IMAGE: iris-ml:${{ github.sha }}
+          MODEL_VERSION: ${{ steps.train.outputs.version }}
+        run: |
+          set -o pipefail
+          kind load docker-image "$IMAGE" --name kubernetes-demo-cluster
+          sed \
+            -e "s|image: iris-ml:local|image: ${IMAGE}|" \
+            -e "s|git.commit: local|git.commit: ${GITHUB_SHA}|" \
+            -e "s|mlflow.model-version: local|mlflow.model-version: ${MODEL_VERSION}|" \
+            k8s/iris-inference.yaml \
+            | kubectl apply -f -
+          kubectl -n iris-ml rollout status deployment/iris-inference --timeout=180s
+
+      - name: Verify deployed model endpoint
+        run: |
+          kubectl -n iris-ml port-forward service/iris-inference 18080:8000 \
+            > "$RUNNER_TEMP/iris-port-forward.log" 2>&1 &
+          port_forward_pid=$!
+          trap 'kill "$port_forward_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 20); do
+            curl --fail --silent http://127.0.0.1:18080/healthz >/dev/null && break
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18080/healthz
+          curl --fail --silent -X POST http://127.0.0.1:18080/predict \
+            -H 'Content-Type: application/json' \
+            -d '{"sepal length (cm)":5.1,"sepal width (cm)":3.5,"petal length (cm)":1.4,"petal width (cm)":0.2}' \
+            | grep -q '"species": "setosa"'

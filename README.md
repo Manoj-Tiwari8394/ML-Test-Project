@@ -37,7 +37,8 @@ The executable should point to this project’s `.venv/bin/python`. To leave the
 | scikit-learn | Load Iris, split data, preprocess measurements, train and score the model |
 | SciPy | Numerical optimization used internally by scikit-learn |
 | joblib | Save and load the trained model pipeline |
-| MLflow | Record training parameters, metrics, and model artifacts |
+| MLflow | Record training parameters, metrics, model artifacts, and CI registry versions |
+| SQLAlchemy | SQLite-backed MLflow tracking and Model Registry |
 | DVC | Local data and pipeline versioning |
 | pytest | Verify dataset validation, preprocessing, training, and predictions |
 | FastAPI | Not required; the prediction endpoint uses Python's standard-library HTTP server |
@@ -113,7 +114,7 @@ The raw CSV is 150 rows; the prepared CSV, model, and metrics are local DVC stag
 
 ## Local MLflow tracking
 
-Each `python -m src.train` invocation creates an MLflow **run** in the `iris-logistic-regression` **experiment**. It logs the training parameters (including `C`), accuracy and macro F1 metrics, and the fitted scikit-learn pipeline as a model artifact with a signature and sample input. Artifacts and run metadata are kept locally in `mlruns/`, which is ignored by Git. The standalone joblib model remains at `models/iris_model.joblib` for evaluation and prediction.
+Each `python -m src.train` invocation creates an MLflow **run** in the `iris-logistic-regression` **experiment**. It logs the training parameters (including `C`), accuracy and macro F1 metrics, and the fitted scikit-learn pipeline as a model artifact with a signature and sample input. By default, interactive local runs use the file-backed `mlruns/` store, which is ignored by Git. The standalone joblib model remains at `models/iris_model.joblib` for evaluation and prediction.
 
 Try three small runs with different regularization strengths:
 
@@ -123,13 +124,13 @@ python -m src.train --c 1.0
 python -m src.train --c 10.0
 ```
 
-Start the local tracking UI in a separate terminal from the project root, with the virtual environment activated:
+Start the file-backed local tracking UI in a separate terminal from the project root, with the virtual environment activated:
 
 ```bash
 mlflow ui --backend-store-uri ./mlruns --host 127.0.0.1 --port 5000
 ```
 
-Open `http://127.0.0.1:5000` in a browser. Stop the UI with Ctrl+C. This local file-backed setup requires no cloud service or separate MLflow server; MLflow groups runs into experiments, while each run stores its own parameters, metrics, and model artifact. DVC tracks the data and pipeline; MLflow records the outcomes of training runs.
+Open `http://127.0.0.1:5000` in a browser. Stop the UI with Ctrl+C. DVC tracks the data and pipeline; MLflow records the outcomes of training runs.
 
 ## Tests
 
@@ -143,11 +144,12 @@ The tests check that the dataset loader returns the expected rows and columns, r
 
 ## Docker image
 
-The image uses `python:3.12-slim`, installs only the pinned packages needed for inference, copies the source, and trains the tiny Iris model during the image build. It runs as a non-root user and starts the standard-library HTTP server on port 8000. DVC, MLflow, pytest, and the Kubeflow SDK are not installed in the inference image. `docker-compose.yml` is intentionally omitted.
+The image uses `python:3.12-slim`, installs only the pinned packages needed for inference, and copies the source plus the already-trained model. It runs as a non-root user and starts the standard-library HTTP server on port 8000. DVC, MLflow, pytest, and the Kubeflow SDK are not installed in the inference image. `docker-compose.yml` is intentionally omitted.
 
 Build and run it locally:
 
 ```bash
+python -m src.export_model --output models/iris_model.joblib
 docker build -t iris-ml:local .
 docker run --rm -p 8000:8000 iris-ml:local
 ```
@@ -163,15 +165,62 @@ curl -X POST http://127.0.0.1:8000/predict \
 
 The API returns JSON containing the predicted species. The Docker port mapping connects host port 8000 to container port 8000.
 
-## GitHub Actions CI
+## Automatic tracking, registry, and deployment
 
-The repository-root workflow at `.github/workflows/iris-ci.yml` runs on pushes and pull requests that change this project. It sets up Python 3.12, installs project dependencies, runs pytest and syntax checks, builds the Docker image, and compiles the Kubeflow pipeline. It does not publish images or deploy to a cluster: a GitHub-hosted runner cannot reach this private local Kind cluster, and no registry or cluster credentials are configured.
+Every push and pull request runs the GitHub-hosted `validate` job: it tests the code, builds and smoke-tests the inference image, and compiles the KFP workflow. A successful push to `master` additionally starts `register-and-deploy` on a repository self-hosted runner labelled `iris-mlops`.
+
+On each successful `master` push, that job:
+
+1. Trains and evaluates the model.
+2. Creates an MLflow run in the `iris-push-deploy` experiment. Tags record the Git commit SHA, commit author and message, changed file paths, branch, GitHub actor, event type, commit time, and CI start time. Parameters and held-out metrics are logged too.
+3. Registers the trained model as a new version of `iris-classifier` in MLflow Model Registry.
+4. Builds a Docker image containing that same trained model, labels it with the commit and model version, loads it into Kind, and updates the Deployment.
+5. Waits for Kubernetes readiness and smoke-tests the deployed prediction endpoint.
+
+The Registry uses a local SQLite database and artifact files under `$HOME/.local/share/iris-mlops/` on the WSL machine. These are persistent local state, not part of Git. Back up this directory if the experiment history and model versions matter. No credentials, tokens, or model artifacts are committed.
+
+**Required one-time setup:** in the GitHub repository, open **Settings → Actions → Runners → New self-hosted runner**, select Linux x64, and follow GitHub’s displayed setup instructions on the WSL machine. Configure the runner with the custom label `iris-mlops`, install/run it as a service, and keep WSL, Docker, and the Kind cluster available. The runner’s Linux account must have access to the Docker daemon and the intended Kind `kubectl` context. The ephemeral runner registration token is shown by GitHub during setup; keep it private and never add it to this repository.
+
+Self-hosted runners execute repository code with access to the local machine. The workflow deliberately limits deployment to pushes to `master`; pull requests run only on GitHub-hosted runners. Protect `master` and limit who can push to it. Do not allow untrusted pull-request code to run on the self-hosted runner.
+
+Until that one-time runner setup is complete, the deployment job will remain queued waiting for a matching runner. The GitHub-hosted validation job continues to run independently. Do not push repeated commits while deployment is queued; the job needs this self-hosted runner to finish the pipeline.
+
+### Inspect the push experiment and registered models
+
+The CI run records GitHub actor (who pushed), commit author/message and changed paths (what and why), commit time, CI start time, branch, and commit SHA as MLflow tags. The source code also records hyperparameters, test metrics, and a model artifact. Every successful `master` push creates a new version under the `iris-classifier` registered model.
+
+After the self-hosted runner is set up and has completed a run, start the registry-backed UI in a WSL terminal:
+
+```bash
+mlflow server \
+  --backend-store-uri "sqlite:///$HOME/.local/share/iris-mlops/mlflow.db" \
+  --default-artifact-root "file://$HOME/.local/share/iris-mlops/artifacts" \
+  --host 127.0.0.1 \
+  --port 5000
+```
+
+Open `http://127.0.0.1:5000`; choose the `iris-push-deploy` experiment to inspect runs and the Models page to inspect registry versions. This UI reads the same SQLite database and artifact folder used by CI. The earlier file-backed `mlruns/` runs remain separate.
+
+The deployed pod template carries `git.commit` and `mlflow.model-version` annotations; inspect them with:
+
+```bash
+kubectl -n iris-ml get pods \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.git\.commit}{"\t"}{.metadata.annotations.mlflow\.model-version}{"\n"}{end}'
+```
+
+To roll back the Kubernetes Deployment to its previous ReplicaSet (this does not delete the MLflow version):
+
+```bash
+kubectl -n iris-ml rollout undo deployment/iris-inference
+kubectl -n iris-ml rollout status deployment/iris-inference
+```
 
 ```text
 Developer -> git push / pull request -> GitHub Actions
-                                      -> tests and syntax checks
-                                      -> Docker image build
-                                      -> Kubeflow pipeline compile
+                                      -> GitHub-hosted validation and image smoke test
+                                      -> (trusted master push) WSL self-hosted runner
+                                           -> MLflow run + model registry version
+                                           -> versioned image -> Kind rollout
 ```
 
 ## Kubeflow Pipelines (optional)
@@ -192,6 +241,7 @@ This writes `pipelines/iris-training-pipeline.yaml`. To run it, you need a worki
 With Docker and the existing Kind cluster running, build and load the image, then deploy:
 
 ```bash
+python -m src.export_model --output models/iris_model.joblib
 docker build -t iris-ml:local .
 kind load docker-image iris-ml:local --name kubernetes-demo-cluster
 kubectl apply -f k8s/iris-inference.yaml
@@ -220,12 +270,14 @@ The active Kind cluster currently runs the Iris prediction Deployment, not Kubef
 | `python: command not found` before activation | On this Ubuntu/WSL setup, create the environment with `python3 -m venv .venv`, then activate it with `source .venv/bin/activate`. |
 | Imports fail or packages appear missing | Activate `.venv` and install the pinned dependencies with `python -m pip install -r requirements-dev.txt`. Check `which python` points inside `.venv`. |
 | DVC reports a changed output | Run `dvc repro` to regenerate the dependent stages, then `dvc status`. The project uses only its local DVC cache; there is no cloud remote. |
-| The prediction CLI says the model is missing | Run `python -m src.train` first, or build the Docker image, which creates its own model during build. |
+| The prediction CLI says the model is missing | Run `python -m src.train` first. Before building an inference image, run `python -m src.export_model --output models/iris_model.joblib`. |
 | Docker cannot access the daemon | Check `docker info`; start the Docker Engine in Ubuntu or the Docker Desktop WSL integration configured for this distro. Compose is not required. |
 | Docker reports host port 8000 is already allocated | Use a different host port, e.g. `docker run --rm -p 18000:8000 iris-ml:local`, and send requests to port 18000. |
 | Kubernetes reports `ImagePullBackOff` for `iris-ml:local` | Build the image and load it into this Kind cluster: `kind load docker-image iris-ml:local --name kubernetes-demo-cluster`. |
 | Kubernetes port-forward cannot bind port 8000 | Choose an unused local port, e.g. `kubectl -n iris-ml port-forward service/iris-inference 18000:8000`. |
 | Kubeflow pipeline compiles, but cannot be run | Compilation creates a package only. A KFP server and a worker-accessible training image are also required; neither is installed/configured in this lightweight setup. |
+| The deployment job is queued | The WSL self-hosted runner must be registered with the `iris-mlops` label, running as a service, and able to access Docker and Kind. |
+| MLflow Registry is unavailable in local training | Registry operations require a database-backed tracking store. Automatic CI configures SQLite; ordinary local runs use the file-backed `mlruns/` store unless `MLFLOW_TRACKING_URI` is set. SQLAlchemy is pinned to 2.0 because MLflow 2.22.2 is incompatible with SQLAlchemy 2.1. |
 
 ## Production comparison
 

@@ -19,6 +19,9 @@ spec:
     metadata:
       labels:
         app: iris-inference
+      annotations:
+        git.commit: "local"
+        mlflow.model-version: "local"
     spec:
       containers:
         - name: inference

@@ -29,6 +29,10 @@ stages:
       hash: md5
       md5: 72de67d2f0a43b9f53c08f399d9e96ef
       size: 3878
+    - path: requirements.txt
+      hash: md5
+      md5: 9d76fd60584843c2d18db5ec4ce37df5
+      size: 138
     - path: src/data_loader.py
       hash: md5
       md5: bc674291494c5668234e183a1a157013
@@ -45,10 +49,14 @@ stages:
       hash: md5
       md5: 0aabeeca9cf92a337d8b9ab0de14ef2b
       size: 849
+    - path: src/run_metadata.py
+      hash: md5
+      md5: 244be1926fd8b2491d3467bdc407327c
+      size: 2182
     - path: src/train.py
       hash: md5
-      md5: b0742e2c72a7500af4981e5689dfec56
-      size: 4129
+      md5: 5628b06c6740108dc83c1233dacc5e19
+      size: 6022
     params:
       params.yaml:
         train.c: 1.0

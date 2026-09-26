@@ -19,7 +19,9 @@ stages:
       - src/evaluate.py
       - src/paths.py
       - src/preprocess.py
+      - src/run_metadata.py
       - src/train.py
+      - requirements.txt
     params:
       - train.c
       - train.random_state

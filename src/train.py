@@ -2,6 +2,7 @@
 
 import argparse
 import math
+import os
 from pathlib import Path
 
 import joblib
@@ -18,6 +19,7 @@ from src.paths import (
     MLFLOW_TRACKING_DIR,
 )
 from src.preprocess import split_train_test
+from src.run_metadata import collect_run_metadata
 
 
 def log_mlflow_run(
@@ -25,20 +27,44 @@ def log_mlflow_run(
     features: pd.DataFrame,
     params: dict[str, int | float | str],
     metrics: dict[str, float],
-) -> str:
-    """Log one training run and its model to the local MLflow store."""
+    tags: dict[str, str] | None = None,
+    registered_model_name: str | None = None,
+) -> tuple[str, str | None]:
+    """Log one training run and optionally register its model."""
     import mlflow
     import mlflow.sklearn
     from mlflow.models import infer_signature
+    from mlflow.tracking import MlflowClient
 
-    from src.paths import DEFAULT_EXPERIMENT_NAME, MLFLOW_TRACKING_DIR
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_TRACKING_DIR.as_uri())
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient(tracking_uri=tracking_uri)
+    experiment_name = str(params.get("experiment_name", DEFAULT_EXPERIMENT_NAME))
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        artifact_root = os.getenv("MLFLOW_ARTIFACT_ROOT")
+        if artifact_root and artifact_root.startswith("file://"):
+            Path(artifact_root.removeprefix("file://")).mkdir(parents=True, exist_ok=True)
+        experiment_id = client.create_experiment(
+            experiment_name,
+            artifact_location=(
+                f"{artifact_root.rstrip('/')}/{experiment_name}"
+                if artifact_root
+                else None
+            ),
+        )
+    else:
+        experiment_id = experiment.experiment_id
 
-    MLFLOW_TRACKING_DIR.mkdir(parents=True, exist_ok=True)
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_DIR.as_uri())
-    mlflow.set_experiment(params.get("experiment_name", DEFAULT_EXPERIMENT_NAME))
-    with mlflow.start_run() as run:
+    run_id = ""
+    with mlflow.start_run(experiment_id=experiment_id) as run:
+        run_id = run.info.run_id
         mlflow.log_params({key: value for key, value in params.items() if key != "experiment_name"})
         mlflow.log_metrics(metrics)
+        run_tags = dict(tags or {})
+        run_tags.update(collect_run_metadata())
+        if run_tags:
+            mlflow.set_tags(run_tags)
         signature = infer_signature(features, model.predict(features))
         mlflow.sklearn.log_model(
             model,
@@ -46,7 +72,22 @@ def log_mlflow_run(
             signature=signature,
             input_example=features.head(3),
         )
-    return run.info.run_id
+
+    model_version = None
+    if registered_model_name:
+        version = mlflow.register_model(
+            f"runs:/{run_id}/model",
+            registered_model_name,
+            await_registration_for=120,
+        )
+        model_version = version.version
+        client.set_model_version_tag(
+            registered_model_name,
+            model_version,
+            "git.commit",
+            (tags or {}).get("git.commit", os.getenv("GITHUB_SHA", "local")),
+        )
+    return run_id, model_version
 
 
 def build_model(c: float = 1.0) -> Pipeline:
@@ -87,6 +128,10 @@ def main() -> None:
         default=DEFAULT_MODEL_PATH,
         help="Where to save the trained model.",
     )
+    parser.add_argument(
+        "--register-model-name",
+        help="Optional MLflow Registry model name; requires a database-backed tracking store.",
+    )
     args = parser.parse_args()
 
     data = load_dataset(args.data_path)
@@ -97,7 +142,7 @@ def main() -> None:
     args.model_path.parent.mkdir(parents=True, exist_ok=True)
     metrics = evaluate_model(model, X_test, y_test)
 
-    run_id = log_mlflow_run(
+    run_id, model_version = log_mlflow_run(
         model,
         X_train,
         {
@@ -110,6 +155,7 @@ def main() -> None:
             "experiment_name": args.experiment_name,
         },
         metrics,
+        registered_model_name=args.register_model_name,
     )
     joblib.dump(model, args.model_path)
 
@@ -117,7 +163,9 @@ def main() -> None:
     print(f"Test examples: {len(X_test)}")
     print(f"Saved model to: {args.model_path}")
     print(f"MLflow run ID: {run_id}")
-    print(f"MLflow tracking directory: {MLFLOW_TRACKING_DIR}")
+    print(f"MLflow tracking URI: {os.getenv('MLFLOW_TRACKING_URI', MLFLOW_TRACKING_DIR.as_uri())}")
+    if model_version:
+        print(f"Registered model: {args.register_model_name} version {model_version}")
     for name, value in metrics.items():
         print(f"{name}: {value:.3f}")
 

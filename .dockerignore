@@ -13,4 +13,3 @@ notebooks
 requirements.txt
 requirements-dev.txt
 requirements-kfp.txt
-models/*.joblib
