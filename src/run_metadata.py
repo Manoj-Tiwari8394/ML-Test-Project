@@ -20,6 +20,16 @@ def _git(*args: str, cwd: Path) -> str:
     return result.stdout.strip()
 
 
+def _has_commit(commit: str, cwd: Path) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def collect_run_metadata(cwd: Path | None = None) -> dict[str, str]:
     """Return MLflow tags describing the GitHub push that started this run."""
     if not os.getenv("GITHUB_ACTIONS"):
@@ -49,7 +59,7 @@ def collect_run_metadata(cwd: Path | None = None) -> dict[str, str]:
     if event_path and Path(event_path).is_file():
         event = json.loads(Path(event_path).read_text(encoding="utf-8"))
         before = event.get("before")
-        if before and set(before) != {"0"}:
+        if before and set(before) != {"0"} and _has_commit(before, repository):
             tags["git.changed_files"] = _git(
                 "diff", "--name-only", before, commit_sha, cwd=repository
             )

@@ -9,6 +9,9 @@ from src.evaluate import evaluate_model
 
 
 def test_training_run_logs_tags_metrics_and_registered_model(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
     tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
     artifact_root = (tmp_path / "artifacts").as_uri()
     monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)

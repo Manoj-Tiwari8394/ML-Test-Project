@@ -64,3 +64,31 @@ def test_collect_run_metadata_is_empty_outside_github_actions(monkeypatch):
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
 
     assert collect_run_metadata() == {}
+
+
+def test_collect_run_metadata_skips_unavailable_shallow_push_base(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "config", "user.name", "Test Author"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"], cwd=repository, check=True
+    )
+    source_file = repository / "README.md"
+    source_file.write_text("content\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add readme"], cwd=repository, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps({"before": "e409ef6f3f6b70ea7552174c7a267a3d0ec90d3d"}))
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_SHA", head)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+
+    tags = collect_run_metadata(repository)
+
+    assert tags["git.commit"] == head
+    assert "git.changed_files" not in tags
