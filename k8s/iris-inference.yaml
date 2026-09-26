@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iris-ml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-inference
+  namespace: iris-ml
+  labels:
+    app: iris-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iris-inference
+  template:
+    metadata:
+      labels:
+        app: iris-inference
+    spec:
+      containers:
+        - name: inference
+          image: iris-ml:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: MODEL_PATH
+              value: /app/models/iris_model.joblib
+            - name: PORT
+              value: "8000"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iris-inference
+  namespace: iris-ml
+spec:
+  selector:
+    app: iris-inference
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+  type: ClusterIP

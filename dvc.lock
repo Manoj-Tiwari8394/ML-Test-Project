@@ -1,0 +1,98 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: python -m src.prepare --input data/raw/iris.csv --output 
+      data/processed/iris.csv
+    deps:
+    - path: data/raw/iris.csv
+      hash: md5
+      md5: 72de67d2f0a43b9f53c08f399d9e96ef
+      size: 3878
+    - path: src/data_loader.py
+      hash: md5
+      md5: bc674291494c5668234e183a1a157013
+      size: 1518
+    - path: src/prepare.py
+      hash: md5
+      md5: 3770a56ee14910008b68c09205a6802f
+      size: 1733
+    outs:
+    - path: data/processed/iris.csv
+      hash: md5
+      md5: 72de67d2f0a43b9f53c08f399d9e96ef
+      size: 3878
+  train:
+    cmd: python -m src.train --data-path data/processed/iris.csv --c 1.0 
+      --test-size 0.2 --random-state 42
+    deps:
+    - path: data/processed/iris.csv
+      hash: md5
+      md5: 72de67d2f0a43b9f53c08f399d9e96ef
+      size: 3878
+    - path: src/data_loader.py
+      hash: md5
+      md5: bc674291494c5668234e183a1a157013
+      size: 1518
+    - path: src/evaluate.py
+      hash: md5
+      md5: 7e36d71dc70fde561598a203f144d3d9
+      size: 2118
+    - path: src/paths.py
+      hash: md5
+      md5: 0070d72cd98129cac7d8102d82791371
+      size: 297
+    - path: src/preprocess.py
+      hash: md5
+      md5: 0aabeeca9cf92a337d8b9ab0de14ef2b
+      size: 849
+    - path: src/train.py
+      hash: md5
+      md5: b0742e2c72a7500af4981e5689dfec56
+      size: 4129
+    params:
+      params.yaml:
+        train.c: 1.0
+        train.random_state: 42
+        train.test_size: 0.2
+    outs:
+    - path: models/iris_model.joblib
+      hash: md5
+      md5: 1a55aace83598418c93c23534d04b1f6
+      size: 2161
+  evaluate:
+    cmd: python -m src.evaluate --data-path data/processed/iris.csv --test-size 
+      0.2 --random-state 42 --metrics-path reports/metrics.json
+    deps:
+    - path: data/processed/iris.csv
+      hash: md5
+      md5: 72de67d2f0a43b9f53c08f399d9e96ef
+      size: 3878
+    - path: models/iris_model.joblib
+      hash: md5
+      md5: 1a55aace83598418c93c23534d04b1f6
+      size: 2161
+    - path: src/data_loader.py
+      hash: md5
+      md5: bc674291494c5668234e183a1a157013
+      size: 1518
+    - path: src/evaluate.py
+      hash: md5
+      md5: 7e36d71dc70fde561598a203f144d3d9
+      size: 2118
+    - path: src/paths.py
+      hash: md5
+      md5: 0070d72cd98129cac7d8102d82791371
+      size: 297
+    - path: src/preprocess.py
+      hash: md5
+      md5: 0aabeeca9cf92a337d8b9ab0de14ef2b
+      size: 849
+    params:
+      params.yaml:
+        train.random_state: 42
+        train.test_size: 0.2
+    outs:
+    - path: reports/metrics.json
+      hash: md5
+      md5: 8ef24b50baa127fcf77c877311278d7c
+      size: 71

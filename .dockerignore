@@ -1,0 +1,16 @@
+.git
+.dvc
+.dvcignore
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+mlruns
+data
+reports
+tests
+notebooks
+requirements.txt
+requirements-dev.txt
+requirements-kfp.txt
+models/*.joblib

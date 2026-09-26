@@ -1,0 +1,46 @@
+stages:
+  prepare:
+    cmd: python -m src.prepare --input data/raw/iris.csv --output data/processed/iris.csv
+    deps:
+      - data/raw/iris.csv
+      - src/data_loader.py
+      - src/prepare.py
+    outs:
+      - data/processed/iris.csv
+
+  train:
+    cmd: >-
+      python -m src.train --data-path data/processed/iris.csv
+      --c ${train.c} --test-size ${train.test_size}
+      --random-state ${train.random_state}
+    deps:
+      - data/processed/iris.csv
+      - src/data_loader.py
+      - src/evaluate.py
+      - src/paths.py
+      - src/preprocess.py
+      - src/train.py
+    params:
+      - train.c
+      - train.random_state
+      - train.test_size
+    outs:
+      - models/iris_model.joblib
+
+  evaluate:
+    cmd: >-
+      python -m src.evaluate --data-path data/processed/iris.csv
+      --test-size ${train.test_size} --random-state ${train.random_state}
+      --metrics-path reports/metrics.json
+    deps:
+      - data/processed/iris.csv
+      - models/iris_model.joblib
+      - src/data_loader.py
+      - src/evaluate.py
+      - src/paths.py
+      - src/preprocess.py
+    params:
+      - train.random_state
+      - train.test_size
+    metrics:
+      - reports/metrics.json

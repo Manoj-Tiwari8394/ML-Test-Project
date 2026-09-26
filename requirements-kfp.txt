@@ -1,0 +1,2 @@
+-r requirements-serving.txt
+kfp==2.17.0
