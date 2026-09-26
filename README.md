@@ -206,3 +206,75 @@ kubectl delete -f k8s/iris-inference.yaml
 ```
 
 Kubernetes runs the container and restarts it when needed; the Service gives the pod a stable in-cluster address. The model is bundled in the image, so no PVC, object storage, model registry, or cluster-wide service is needed. KServe is left optional for a later phase: the current single-node cluster has no Kubeflow installation, and the plain Deployment is easier to understand and lighter to run.
+
+## Resource limits and optional platforms
+
+The main learning project is designed for a CPU-only machine with approximately 4 GB RAM: the dataset has only 150 rows, training is a small scikit-learn operation, the prediction image is about 475 MB, and the local Kubernetes Deployment has a 512 MiB memory limit.
+
+The active Kind cluster currently runs the Iris prediction Deployment, not Kubeflow. The Kubeflow Pipelines definition is compiled by CI but is not submitted to a pipeline server. A KFP server adds multiple platform services, and KServe adds serving controllers and related components; neither is installed because that extra footprint is not justified on this machine. The plain Kubernetes Deployment provides the model-serving learning objective with fewer moving parts. To run the KFP workflow later, use an existing KFP endpoint and make the built training image accessible to its worker pods.
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| `python: command not found` before activation | On this Ubuntu/WSL setup, create the environment with `python3 -m venv .venv`, then activate it with `source .venv/bin/activate`. |
+| Imports fail or packages appear missing | Activate `.venv` and install the pinned dependencies with `python -m pip install -r requirements-dev.txt`. Check `which python` points inside `.venv`. |
+| DVC reports a changed output | Run `dvc repro` to regenerate the dependent stages, then `dvc status`. The project uses only its local DVC cache; there is no cloud remote. |
+| The prediction CLI says the model is missing | Run `python -m src.train` first, or build the Docker image, which creates its own model during build. |
+| Docker cannot access the daemon | Check `docker info`; start the Docker Engine in Ubuntu or the Docker Desktop WSL integration configured for this distro. Compose is not required. |
+| Docker reports host port 8000 is already allocated | Use a different host port, e.g. `docker run --rm -p 18000:8000 iris-ml:local`, and send requests to port 18000. |
+| Kubernetes reports `ImagePullBackOff` for `iris-ml:local` | Build the image and load it into this Kind cluster: `kind load docker-image iris-ml:local --name kubernetes-demo-cluster`. |
+| Kubernetes port-forward cannot bind port 8000 | Choose an unused local port, e.g. `kubectl -n iris-ml port-forward service/iris-inference 18000:8000`. |
+| Kubeflow pipeline compiles, but cannot be run | Compilation creates a package only. A KFP server and a worker-accessible training image are also required; neither is installed/configured in this lightweight setup. |
+
+## Production comparison
+
+This repository demonstrates lifecycle concepts locally; it is not a production deployment. A larger real system might add:
+
+| Production capability | Why it may be added |
+|---|---|
+| Object storage and a remote DVC cache | Share versioned datasets and artifacts across developers and CI |
+| Hosted MLflow tracking and a model registry | Centralize runs, model versions, approvals, and lineage |
+| CI/CD and a container registry | Build, scan, version, and promote immutable images |
+| Kubernetes with KServe | Operate scalable model endpoints with rollout and traffic management |
+| Data validation and model monitoring | Detect broken inputs, drift, and changes in model behavior |
+| Central logging and observability | Diagnose service errors and resource/performance problems |
+| Secrets management and cloud infrastructure | Protect credentials and provision controlled environments |
+
+These services require operational work, credentials, infrastructure, and more memory. They are deliberately excluded from the beginner project except for a small local Docker image and the existing lightweight Kind deployment.
+
+## Learning map
+
+| Technology | What you learned | Why it exists |
+|---|---|---|
+| Python | Organize a small ML application into modules and functions | Implements data handling, training, evaluation, and prediction |
+| Virtualenv (`venv`) | Isolate project dependencies in `.venv` | Avoids changing system Python and keeps package installs project-specific |
+| pandas | Work with labeled tabular data, columns, and DataFrames | Makes feature and target preparation readable |
+| NumPy / SciPy | Use the numerical foundations of the Python ML stack | Support array operations and model optimization |
+| scikit-learn | Split data, scale features, fit logistic regression, and evaluate predictions | Provides simple, consistent classical ML components |
+| Git / GitHub | Version source, configuration, and collaboration changes | Provides the history and shared repository for the project |
+| DVC | Track data pointers, pipeline stages, and reproducible outputs locally | Keeps data/pipeline lineage distinct from source-code history |
+| MLflow | Compare experiment parameters, metrics, and model artifacts | Makes training runs inspectable and repeatable |
+| pytest | Test data validation, preprocessing, training, and predictions | Catches software errors independently of model scores |
+| Docker | Build and run the inference API as a portable image | Packages the runtime and application together |
+| GitHub Actions | Run tests, build/smoke-test Docker, and compile KFP on pushes/PRs | Automates basic continuous integration |
+| Kubernetes | Deploy a container as a Deployment and expose it with a Service | Orchestrates containers and supplies health checks/restarts |
+| Kubeflow Pipelines | Define a parameterized training task and produce model/metric artifacts | Orchestrates multi-step ML workflows when a KFP platform is available |
+| KServe | Not installed in this project | An optional Kubernetes-native model-serving layer for more advanced deployments |
+
+Mental model:
+
+```text
+Python             -> ML code
+Git                -> Code and configuration versioning
+DVC                -> Data and pipeline versioning
+MLflow             -> Experiment and model tracking
+pytest             -> Software correctness
+GitHub Actions     -> Automatic CI
+Docker             -> Portable application image
+Kubernetes         -> Container orchestration
+Kubeflow Pipelines -> ML workflow orchestration (compiled here, server optional)
+KServe             -> Model serving (optional, not installed here)
+```
+
+The order of learning matters: **understanding → reproducibility → simplicity → correctness**. Keep the optional platform infrastructure separate from the lightweight project until there is a real learning or deployment need for it.
